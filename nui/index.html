@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mi Radio - FiveM</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;400;600&display=swap"
+        rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+
+<body>
+    <div id="container" class="hidden">
+        <div class="radio-card">
+            <div class="header">
+                <h1><i class="fas fa-radio"></i> MI RADIO</h1>
+                <button id="close-btn"><i class="fas fa-times"></i></button>
+            </div>
+
+            <div class="search-container">
+                <input type="text" id="search-input" placeholder="URL de YouTube o buscar canción...">
+                <button id="search-btn"><i class="fas fa-search"></i></button>
+            </div>
+
+            <div class="results-container" id="results">
+                <!-- Los resultados de búsqueda aparecerán aquí -->
+                <div class="placeholder-text">Busca una canción o pega un link de YouTube</div>
+            </div>
+
+            <div class="controls">
+                <div class="now-playing" id="now-playing">
+                    <span>Sin reproducir</span>
+                </div>
+                <div class="progress-container">
+                    <span class="time-label" id="time-current">0:00</span>
+                    <input type="range" id="progress-bar" min="0" max="100" value="0" step="1">
+                    <span class="time-label" id="time-total">0:00</span>
+                </div>
+                <div class="buttons">
+                    <div class="playback-buttons">
+                        <button id="backward-btn" title="Retroceder 15s"><i class="fas fa-backward"></i></button>
+                        <button id="play-pause-btn" title="Reproducir/Pausar"><i class="fas fa-play"
+                                id="play-pause-icon"></i></button>
+                        <button id="stop-btn" title="Detener"><i class="fas fa-stop"></i></button>
+                        <button id="forward-btn" title="Adelantar 15s"><i class="fas fa-forward"></i></button>
+                    </div>
+                    <div class="volume-container">
+                        <i class="fas fa-volume-up"></i>
+                        <input type="range" id="volume-range" min="0" max="100" value="50">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+
+</html>
