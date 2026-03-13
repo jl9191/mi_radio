@@ -25,7 +25,7 @@ Config.MaxDistance = 20.0        -- Distancia en metros que otros jugadores escu
 ## Uso
 
 1. Entra a un vehículo
-2. Escribe `/carradiov3` en el chat
+2. Escribe `/carradio` en el chat
 3. Busca una canción o pega una URL directa (YouTube, .mp3, .ogg, etc.)
 4. Usa los controles: ▶️ Play/Pause, ⏹️ Stop, ⏩ +15s, ⏪ -15s, 🔊 Volumen
 
