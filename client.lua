@@ -1,287 +1,454 @@
 local QBCore = exports['qb-core']:GetCoreObject()
-local isGuiOpen = false
+local isGuiOpen    = false
+local currentSoundId  = nil
+local currentVehicle  = nil
 
--- Estado por vehículo: vehicleRadios[plate] = { soundId, vehicle, timeStamp, maxDuration, isPaused, volume, title, url }
-local vehicleRadios = {}
+-- Rastreador de todas las radios que este cliente está reproduciendo (plate -> url)
+local trackedRadios = {}
+-- Caché de entidades de vehículos para optimizar el thread de posición (plate -> entity)
+local activeVehicles = {}
+-- Caché de vehículos que NO tienen música (evita spamear al servidor)
+local emptyRadios = {}
 
--- Última placa del vehículo en que estamos (para detectar cambio de vehículo)
-local lastVehiclePlate = nil
+-- Tracker de tiempo local
+-- FIX (drift): En lugar de sumar +1 por cada Wait(1000) (impreciso),
+-- guardamos el os.clock() real del último tick y sumamos la diferencia exacta.
+local localTimeStamp  = 0
+local localMaxDuration = 0
+local localIsPaused   = false
+local localLastTick   = 0  -- GetGameTimer() del último tick procesado
 
--- Helper: obtener placa limpia de un vehículo
-function getPlate(vehicle)
-    if vehicle == 0 then return nil end
-    return string.gsub(GetVehicleNumberPlateText(vehicle), "%s+", "")
+-- ============================================================
+-- HELPERS
+-- ============================================================
+
+local function getVehicleFromPlate(plate)
+    if activeVehicles[plate] and DoesEntityExist(activeVehicles[plate]) then
+        return activeVehicles[plate]
+    end
+    local vehicles = GetGamePool('CVehicle')
+    for _, veh in ipairs(vehicles) do
+        local vehPlate = string.gsub(GetVehicleNumberPlateText(veh), "%s+", "")
+        if vehPlate == plate then
+            activeVehicles[plate] = veh
+            return veh
+        end
+    end
+    return nil
 end
 
--- Helper: obtener la radio del vehículo actual del jugador
-function getActiveRadio()
-    local ped = PlayerPedId()
-    local veh = GetVehiclePedIsIn(ped, false)
-    if veh == 0 then return nil, nil, nil end
-    local plate = getPlate(veh)
-    return plate, vehicleRadios[plate], veh
-end
+-- ============================================================
+-- RADIO TOGGLE
+-- ============================================================
 
--- Función para abrir/cerrar la radio
 function toggleRadio(status)
     local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
+    local vehicle   = GetVehiclePedIsIn(playerPed, false)
 
     if status then
         if vehicle ~= 0 then
-            isGuiOpen = true
+            isGuiOpen    = true
             SetNuiFocus(true, true)
-            SendNUIMessage({
-                type = "show",
-                status = true,
-                apiKey = Config.YoutubeApiKey
-            })
 
-            -- Sincronizar UI con el estado actual de este vehículo
-            local plate = getPlate(vehicle)
-            local radio = vehicleRadios[plate]
+            -- Reset de variables de sesión al abrir
+            currentSoundId  = nil
+            currentVehicle  = vehicle
+            localTimeStamp  = 0
+            localMaxDuration = 0
+            localIsPaused   = false
+            localLastTick   = GetGameTimer()
 
-            if radio and exports.xsound:soundExists(radio.soundId) then
-                -- Hay radio activa en este vehículo, sincronizar NUI
-                SendNUIMessage({
-                    type = "syncState",
-                    title = radio.title or "Desconocido",
-                    isPlaying = not radio.isPaused,
-                    currentTime = radio.timeStamp,
-                    maxDuration = radio.maxDuration,
-                    volume = radio.volume or 0.5
-                })
-            else
-                -- No hay radio activa, resetear NUI
-                SendNUIMessage({
-                    type = "syncState",
-                    title = nil,
-                    isPlaying = false,
-                    currentTime = 0,
-                    maxDuration = 0,
-                    volume = 0.5
-                })
-            end
+            local plate = string.gsub(GetVehicleNumberPlateText(vehicle), "%s+", "")
+            TriggerServerEvent('mi_radio:server:requestState', plate)
+
+            SendNUIMessage({ type = "show", status = true })
         else
             QBCore.Functions.Notify("Debes estar en un vehiculo para usar la radio", "error")
         end
     else
         isGuiOpen = false
         SetNuiFocus(false, false)
-        SendNUIMessage({
-            type = "show",
-            status = false
-        })
+        SendNUIMessage({ type = "show", status = false })
     end
 end
 
--- Comando para abrir la radio
 RegisterCommand(Config.Command, function()
     toggleRadio(not isGuiOpen)
 end)
 
--- Callback para cerrar la radio desde el NUI
+-- ============================================================
+-- NUI CALLBACKS
+-- ============================================================
+
 RegisterNUICallback('close', function(data, cb)
     toggleRadio(false)
     cb('ok')
 end)
 
--- Callback para reproducir música
 RegisterNUICallback('playMusic', function(data, cb)
-    local url = data.url
-    local title = data.title or "Desconocido"
     local playerPed = PlayerPedId()
-    local vehicle = GetVehiclePedIsIn(playerPed, false)
-
+    local vehicle   = GetVehiclePedIsIn(playerPed, false)
     if vehicle ~= 0 then
-        local plate = getPlate(vehicle)
-        local soundId = "radio_" .. plate
+        local plate = string.gsub(GetVehicleNumberPlateText(vehicle), "%s+", "")
+        TriggerServerEvent('mi_radio:server:playMusic', plate, data.url, data.title, data.duration)
+    end
+    cb('ok')
+end)
 
-        -- Si este vehículo ya tiene radio activa, destruirla primero
-        if vehicleRadios[plate] and vehicleRadios[plate].soundId then
-            if exports.xsound:soundExists(vehicleRadios[plate].soundId) then
-                exports.xsound:Destroy(vehicleRadios[plate].soundId)
+RegisterNUICallback('stopMusic', function(data, cb)
+    if currentVehicle then
+        local plate = string.gsub(GetVehicleNumberPlateText(currentVehicle), "%s+", "")
+        TriggerServerEvent('mi_radio:server:stopMusic', plate)
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('pauseMusic', function(data, cb)
+    if currentVehicle then
+        local plate = string.gsub(GetVehicleNumberPlateText(currentVehicle), "%s+", "")
+        TriggerServerEvent('mi_radio:server:pauseMusic', plate)
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('resumeMusic', function(data, cb)
+    if currentVehicle then
+        local plate = string.gsub(GetVehicleNumberPlateText(currentVehicle), "%s+", "")
+        TriggerServerEvent('mi_radio:server:resumeMusic', plate)
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('seekMusic', function(data, cb)
+    if currentVehicle and currentSoundId then
+        local plate   = string.gsub(GetVehicleNumberPlateText(currentVehicle), "%s+", "")
+        local newTime = localTimeStamp + (data.offset or 0)
+        if newTime < 0 then newTime = 0 end
+        TriggerServerEvent('mi_radio:server:seekMusic', plate, newTime)
+    end
+    cb('ok')
+end)
+
+-- FIX (race condition seekToPercent): Si xsound aún no cargó la duración,
+-- avisamos al usuario en lugar de fallar silenciosamente.
+RegisterNUICallback('seekToPercent', function(data, cb)
+    if currentVehicle and currentSoundId then
+        local plate  = string.gsub(GetVehicleNumberPlateText(currentVehicle), "%s+", "")
+        local maxDur = exports.xsound:getMaxDuration(currentSoundId) or 0
+        if maxDur <= 0 then maxDur = localMaxDuration end
+
+        if maxDur > 0 then
+            local newTime = math.floor(maxDur * data.percent)
+            TriggerServerEvent('mi_radio:server:seekMusic', plate, newTime)
+        else
+            -- El audio aún no está listo; notificar al NUI para que muestre feedback
+            SendNUIMessage({ type = "seekNotReady" })
+        end
+    end
+    cb('ok')
+end)
+
+RegisterNUICallback('setVolume', function(data, cb)
+    if currentSoundId then
+        exports.xsound:setVolume(currentSoundId, data.volume)
+    end
+    cb('ok')
+end)
+
+-- ============================================================
+-- EVENTOS DE SINCRONIZACIÓN (recibidos del servidor)
+-- ============================================================
+
+RegisterNetEvent('mi_radio:client:syncRadio', function(plate, data)
+    local playerPed = PlayerPedId()
+    local vehicle   = GetVehiclePedIsIn(playerPed, false)
+
+    local myPlate = ""
+    if vehicle ~= 0 then
+        myPlate = string.gsub(GetVehicleNumberPlateText(vehicle), "%s+", "")
+    end
+
+    local soundId = "radio_" .. plate
+    emptyRadios[plate] = nil
+
+    if not exports.xsound:soundExists(soundId) or trackedRadios[plate] ~= data.url then
+        if exports.xsound:soundExists(soundId) then
+            exports.xsound:Destroy(soundId)
+        end
+
+        local vehObject = getVehicleFromPlate(plate)
+        if vehObject then
+            local coords = GetEntityCoords(vehObject)
+            exports.xsound:PlayUrlPos(soundId, data.url, 0.5, coords, false)
+            exports.xsound:Distance(soundId, Config.MaxDistance)
+            trackedRadios[plate]  = data.url
+            activeVehicles[plate] = vehObject
+
+            if data.timestamp > 0 then
+                exports.xsound:setTimeStamp(soundId, data.timestamp)
+            end
+            if data.isPaused then
+                exports.xsound:Pause(soundId)
             end
         end
-
-        -- Crear sonido posicional en la posición del vehículo
-        local vehCoords = GetEntityCoords(vehicle)
-        exports.xsound:PlayUrlPos(soundId, url, 0.5, vehCoords, false)
-        exports.xsound:Distance(soundId, Config.MaxDistance)
-
-        -- Guardar estado para este vehículo
-        vehicleRadios[plate] = {
-            soundId = soundId,
-            vehicle = vehicle,
-            timeStamp = 0,
-            maxDuration = data.duration or 0,
-            isPaused = false,
-            volume = 0.5,
-            title = title,
-            url = url
-        }
-    end
-    cb('ok')
-end)
-
--- Callback para pausar
-RegisterNUICallback('pauseMusic', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId then
-        exports.xsound:Pause(radio.soundId)
-        radio.isPaused = true
-    end
-    cb('ok')
-end)
-
--- Callback para reanudar
-RegisterNUICallback('resumeMusic', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId then
-        exports.xsound:Resume(radio.soundId)
-        radio.isPaused = false
-    end
-    cb('ok')
-end)
-
--- Callback para cambiar volumen
-RegisterNUICallback('setVolume', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId then
-        exports.xsound:setVolume(radio.soundId, data.volume)
-        radio.volume = data.volume
-    end
-    cb('ok')
-end)
-
--- Callback para adelantar/retroceder (offset en segundos)
-RegisterNUICallback('seekMusic', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId and exports.xsound:soundExists(radio.soundId) then
-        local offset = data.offset or 0
-        local newTime = radio.timeStamp + offset
-
-        if newTime < 0 then newTime = 0 end
-
-        local maxDuration = exports.xsound:getMaxDuration(radio.soundId) or 0
-        if maxDuration <= 0 then maxDuration = radio.maxDuration end
-        if maxDuration > 0 and newTime > maxDuration then
-            newTime = maxDuration
-        end
-
-        exports.xsound:setTimeStamp(radio.soundId, newTime)
-        radio.timeStamp = newTime
-    end
-    cb('ok')
-end)
-
--- Callback para seek por porcentaje (barra de progreso)
-RegisterNUICallback('seekToPercent', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId and exports.xsound:soundExists(radio.soundId) then
-        local maxDuration = exports.xsound:getMaxDuration(radio.soundId) or 0
-        if maxDuration <= 0 then maxDuration = radio.maxDuration end
-        if maxDuration > 0 then
-            local newTime = math.floor(maxDuration * data.percent)
-            exports.xsound:setTimeStamp(radio.soundId, newTime)
-            radio.timeStamp = newTime
+    else
+        if data.timestamp > 0 then
+            local currentTime = exports.xsound:getTimeStamp(soundId) or 0
+            if math.abs(currentTime - data.timestamp) > 3 then
+                exports.xsound:setTimeStamp(soundId, data.timestamp)
+            end
         end
     end
-    cb('ok')
-end)
 
--- Callback para detener la música
-RegisterNUICallback('stopMusic', function(data, cb)
-    local plate, radio = getActiveRadio()
-    if radio and radio.soundId then
-        if exports.xsound:soundExists(radio.soundId) then
-            exports.xsound:Destroy(radio.soundId)
+    if myPlate == plate then
+        currentSoundId   = soundId
+        currentVehicle   = vehicle
+        localTimeStamp   = tonumber(data.timestamp) or 0
+        localMaxDuration = tonumber(data.duration) or 0
+        localIsPaused    = data.isPaused
+        -- FIX (drift): Reiniciamos el reloj local al recibir un sync del servidor,
+        -- así el contador arranca desde un punto de referencia preciso.
+        localLastTick = GetGameTimer()
+
+        if isGuiOpen then
+            SendNUIMessage({
+                type        = "updateProgress",
+                currentTime = localTimeStamp,
+                maxDuration = localMaxDuration,
+                title       = data.title,
+                isPaused    = data.isPaused
+            })
         end
-        vehicleRadios[plate] = nil
     end
-    cb('ok')
 end)
 
--- Thread para actualizar la posición del sonido con la del vehículo (TODOS los vehículos activos)
+RegisterNetEvent('mi_radio:client:syncStop', function(plate)
+    local soundId = "radio_" .. plate
+    if exports.xsound:soundExists(soundId) then
+        exports.xsound:Destroy(soundId)
+    end
+    trackedRadios[plate]  = nil
+    activeVehicles[plate] = nil
+    emptyRadios[plate]    = GetGameTimer() + 10000
+
+    if currentSoundId == soundId then
+        currentSoundId   = nil
+        -- FIX (stale currentVehicle): Limpiamos también currentVehicle aquí,
+        -- no solo cuando el jugador cierra la GUI, para evitar referencias viejas.
+        currentVehicle   = nil
+        localTimeStamp   = 0
+        localMaxDuration = 0
+        localIsPaused    = false
+        localLastTick    = 0
+        if isGuiOpen then
+            SendNUIMessage({ type = "stopProgress" })
+        end
+    end
+end)
+
+RegisterNetEvent('mi_radio:client:syncPause', function(plate)
+    local soundId = "radio_" .. plate
+    if exports.xsound:soundExists(soundId) then
+        exports.xsound:Pause(soundId)
+    end
+    if currentSoundId == soundId then
+        localIsPaused = true
+        if isGuiOpen then
+            SendNUIMessage({ type = "pauseProgress" })
+        end
+    end
+end)
+
+RegisterNetEvent('mi_radio:client:syncResume', function(plate)
+    local soundId = "radio_" .. plate
+    if exports.xsound:soundExists(soundId) then
+        exports.xsound:Resume(soundId)
+    end
+    if currentSoundId == soundId then
+        localIsPaused = false
+        -- FIX (drift): Reiniciamos el reloj al reanudar para no acumular el tiempo pausado.
+        localLastTick = GetGameTimer()
+        if isGuiOpen then
+            SendNUIMessage({ type = "resumeProgress" })
+        end
+    end
+end)
+
+RegisterNetEvent('mi_radio:client:syncSeek', function(plate, newTime)
+    local soundId = "radio_" .. plate
+    if exports.xsound:soundExists(soundId) then
+        exports.xsound:setTimeStamp(soundId, newTime)
+    end
+    if currentSoundId == soundId then
+        localTimeStamp = newTime
+        -- FIX (drift): Reiniciamos el reloj al hacer seek para que el contador
+        -- parta desde el nuevo tiempo sin acumular error anterior.
+        localLastTick = GetGameTimer()
+    end
+end)
+
+-- ============================================================
+-- THREAD: Actualizar posición del sonido 3D
+-- ============================================================
+
 CreateThread(function()
     while true do
-        Wait(250)
-        for plate, radio in pairs(vehicleRadios) do
-            if radio.vehicle and DoesEntityExist(radio.vehicle) then
-                if exports.xsound:soundExists(radio.soundId) then
-                    local vehCoords = GetEntityCoords(radio.vehicle)
-                    exports.xsound:Position(radio.soundId, vehCoords)
+        local waitTime  = 1000
+        local playerPed = PlayerPedId()
+        local isInVeh   = IsPedInAnyVehicle(playerPed, false)
+
+        local radioCount = 0
+        for plate, entity in pairs(activeVehicles) do
+            radioCount = radioCount + 1
+            local soundId = "radio_" .. plate
+
+            if DoesEntityExist(entity) then
+                if exports.xsound:soundExists(soundId) then
+                    local vCoords = GetEntityCoords(entity)
+                    exports.xsound:Position(soundId, vCoords)
+                    waitTime = isInVeh and 150 or 250
                 end
             else
-                -- Vehículo eliminado/despawneado, limpiar
-                if exports.xsound:soundExists(radio.soundId) then
-                    exports.xsound:Destroy(radio.soundId)
+                if exports.xsound:soundExists(soundId) then
+                    exports.xsound:Destroy(soundId)
                 end
-                vehicleRadios[plate] = nil
+                trackedRadios[plate]  = nil
+                activeVehicles[plate] = nil
+
+                if currentSoundId == soundId then
+                    currentSoundId = nil
+                    -- FIX (stale currentVehicle): limpiar también aquí
+                    currentVehicle = nil
+                end
             end
         end
+
+        if radioCount == 0 then waitTime = 1000 end
+        Wait(waitTime)
     end
 end)
 
--- Thread para contar el tiempo local y enviar progreso al NUI (solo del vehículo actual)
+-- ============================================================
+-- THREAD: Contador de tiempo local (con drift fix)
+-- FIX: En lugar de asumir que Wait(1000) = exactamente 1 segundo,
+-- medimos la diferencia real con os.clock() y la acumulamos.
+-- Esto elimina la deriva que se notaba en canciones largas.
+-- ============================================================
+
 CreateThread(function()
     while true do
-        Wait(1000)
+        Wait(500) -- Tick más frecuente para mayor precisión, sin coste relevante
 
-        -- Actualizar timestamps de TODAS las radios activas
-        for plate, radio in pairs(vehicleRadios) do
-            if not radio.isPaused and exports.xsound:soundExists(radio.soundId) then
-                radio.timeStamp = radio.timeStamp + 1
+        if currentSoundId and not localIsPaused then
+            local now  = GetGameTimer()
+            local diff = (now - localLastTick) / 1000.0
+            localLastTick = now
 
-                -- Si superó la duración, marcar como terminada
-                if radio.maxDuration > 0 and radio.timeStamp >= radio.maxDuration then
-                    radio.timeStamp = radio.maxDuration
-                    radio.isPaused = true
-                end
-
-                -- Sincronizar con xsound si tiene datos reales
-                local xsoundTime = exports.xsound:getTimeStamp(radio.soundId) or 0
-                local xsoundMax = exports.xsound:getMaxDuration(radio.soundId) or 0
-                if xsoundMax > 0 then
-                    radio.timeStamp = xsoundTime
-                    radio.maxDuration = xsoundMax
+            -- Intento obtener la duración real de xsound si aún no la tenemos
+            if localMaxDuration <= 0 then
+                local maxDur = exports.xsound:getMaxDuration(currentSoundId) or 0
+                if maxDur > 0 then
+                    localMaxDuration = math.floor(maxDur)
                 end
             end
-        end
 
-        -- Enviar progreso al NUI solo del vehículo actual
-        if isGuiOpen then
-            local plate, radio = getActiveRadio()
-            if radio then
+            localTimeStamp = localTimeStamp + diff
+
+            -- Clampear al máximo para no pasarnos
+            if localMaxDuration > 0 and localTimeStamp >= localMaxDuration then
+                localTimeStamp = localMaxDuration
+                localIsPaused  = true
+            end
+
+            if isGuiOpen then
                 SendNUIMessage({
-                    type = "updateProgress",
-                    currentTime = radio.timeStamp,
-                    maxDuration = radio.maxDuration
+                    type        = "updateProgress",
+                    currentTime = math.floor(localTimeStamp),
+                    maxDuration = localMaxDuration
                 })
             end
         end
     end
 end)
 
--- Thread para detectar cambio de vehículo y sincronizar estado de la radio
+-- ============================================================
+-- THREAD: Sincronizar al entrar a un vehículo
+-- FIX (stale currentVehicle): Al salir del vehículo sin cerrar la GUI,
+-- limpiamos currentVehicle y currentSoundId para no mantener referencias viejas.
+-- ============================================================
+
 CreateThread(function()
+    local lastVeh = 0
     while true do
         Wait(500)
-        local ped = PlayerPedId()
-        local veh = GetVehiclePedIsIn(ped, false)
-        local currentPlate = nil
+        local playerPed = PlayerPedId()
+        local vehicle   = GetVehiclePedIsIn(playerPed, false)
 
-        if veh ~= 0 then
-            currentPlate = getPlate(veh)
+        if vehicle ~= 0 and vehicle ~= lastVeh then
+            local plate = string.gsub(GetVehicleNumberPlateText(vehicle), "%s+", "")
+            TriggerServerEvent('mi_radio:server:requestState', plate)
+            lastVeh = vehicle
+
+        elseif vehicle == 0 then
+            -- FIX: El jugador salió del vehículo
+            if lastVeh ~= 0 then
+                -- Si la GUI sigue abierta con datos del coche anterior, limpiar
+                if isGuiOpen then
+                    toggleRadio(false)
+                end
+                currentSoundId = nil
+                currentVehicle = nil
+            end
+            lastVeh = 0
+        end
+    end
+end)
+
+-- ============================================================
+-- THREAD: Escáner de área (Sincronización pasiva)
+-- FIX (GetGamePool): Limitamos a un máximo de vehículos procesados por
+-- tick para evitar micro-stutters en servidores con muchos vehículos.
+-- ============================================================
+
+local MAX_VEHICLES_PER_SCAN = 20 -- Máximo de vehículos a procesar por ciclo
+
+CreateThread(function()
+    while true do
+        Wait(2000)
+        local playerPed = PlayerPedId()
+        local pCoords   = GetEntityCoords(playerPed)
+        local currentVeh = GetVehiclePedIsIn(playerPed, false)
+        local pPlate = ""
+        if currentVeh ~= 0 then
+            pPlate = string.gsub(GetVehicleNumberPlateText(currentVeh), "%s+", "")
         end
 
-        -- Detectar si cambió de vehículo
-        if currentPlate ~= lastVehiclePlate then
-            lastVehiclePlate = currentPlate
+        local vehicles  = GetGamePool('CVehicle')
+        local processed = 0
 
-            -- Si la GUI está abierta y cambiamos de vehículo, cerrarla
-            if isGuiOpen then
-                toggleRadio(false)
+        -- Ordenar por distancia primero para priorizar los más cercanos
+        local nearby = {}
+        for _, veh in ipairs(vehicles) do
+            if veh ~= currentVeh then
+                local dist = #(pCoords - GetEntityCoords(veh))
+                if dist < 35.0 then
+                    nearby[#nearby + 1] = { veh = veh, dist = dist }
+                end
+            end
+        end
+        table.sort(nearby, function(a, b) return a.dist < b.dist end)
+
+        for _, entry in ipairs(nearby) do
+            if processed >= MAX_VEHICLES_PER_SCAN then break end
+            processed = processed + 1
+
+            local veh   = entry.veh
+            local plate = string.gsub(GetVehicleNumberPlateText(veh), "%s+", "")
+
+            if not trackedRadios[plate] and plate ~= pPlate then
+                if not emptyRadios[plate] or GetGameTimer() > emptyRadios[plate] then
+                    TriggerServerEvent('mi_radio:server:requestState', plate)
+                end
             end
         end
     end

@@ -1,14 +1,9 @@
-let youtubeApiKey = "";
 let isPlaying = false;
-let progressInterval = null;
 
 window.addEventListener('message', function (event) {
     let item = event.data;
     if (item.type === "show") {
         if (item.status) {
-            if (item.apiKey) {
-                youtubeApiKey = item.apiKey;
-            }
             document.getElementById('container').classList.remove('hidden');
             setTimeout(() => {
                 document.getElementById('container').classList.add('visible');
@@ -21,24 +16,36 @@ window.addEventListener('message', function (event) {
         }
     }
 
-    // Recibir actualización de progreso desde client.lua
+    // Recibir actualización de progreso y estado desde client.lua
     if (item.type === "updateProgress") {
+        // Si viene un título nuevo (sincronización inicial), mostrarlo
+        if (item.title) {
+            nowPlaying.innerHTML = `<span><i class="fas fa-music"></i> ${item.title}</span>`;
+            isPlaying = true;
+            playPauseIcon.className = 'fas fa-pause';
+        }
+
+        // Actualizar icono según el estado de pausa
+        if (item.isPaused !== undefined) {
+            isPlaying = !item.isPaused;
+            playPauseIcon.className = isPlaying ? 'fas fa-pause' : 'fas fa-play';
+        }
+
         updateProgressUI(item.currentTime, item.maxDuration);
     }
 
-    // Sincronizar estado al entrar a un vehículo con radio activa
-    if (item.type === "syncState") {
-        if (item.title) {
-            nowPlaying.innerHTML = `<span><i class="fas fa-music"></i> ${item.title}</span>`;
-            isPlaying = item.isPlaying;
-            playPauseIcon.className = item.isPlaying ? 'fas fa-pause' : 'fas fa-play';
-            updateProgressUI(item.currentTime || 0, item.maxDuration || 0);
-            if (item.volume !== undefined) {
-                volumeRange.value = Math.round(item.volume * 100);
-            }
-        } else {
-            resetUI();
-        }
+    if (item.type === "stopProgress") {
+        resetUI();
+    }
+
+    if (item.type === "pauseProgress") {
+        isPlaying = false;
+        playPauseIcon.className = 'fas fa-play';
+    }
+
+    if (item.type === "resumeProgress") {
+        isPlaying = true;
+        playPauseIcon.className = 'fas fa-pause';
     }
 });
 
@@ -57,7 +64,6 @@ const progressBar = document.getElementById('progress-bar');
 const timeCurrent = document.getElementById('time-current');
 const timeTotal = document.getElementById('time-total');
 
-// Resetear la interfaz a estado inicial
 function resetUI() {
     nowPlaying.innerHTML = `<span>Sin reproducir</span>`;
     isPlaying = false;
@@ -65,9 +71,7 @@ function resetUI() {
     progressBar.value = 0;
     timeCurrent.textContent = '0:00';
     timeTotal.textContent = '0:00';
-    volumeRange.value = 50;
 }
-
 
 // Formatear segundos a m:ss
 function formatTime(seconds) {
@@ -85,6 +89,9 @@ function updateProgressUI(currentTime, maxDuration) {
         progressBar.value = pct;
         timeCurrent.textContent = formatTime(currentTime);
         timeTotal.textContent = formatTime(maxDuration);
+    } else {
+        timeCurrent.textContent = formatTime(currentTime);
+        timeTotal.textContent = "0:00";
     }
 }
 
@@ -115,14 +122,11 @@ function parseDuration(str) {
 
 // Reproducir música
 function playMusic(url, title, duration) {
+    // La UI se actualizará cuando llegue el evento de sincronización desde el servidor
+    // pero podemos mostrar un aviso inmediato
     nowPlaying.innerHTML = `<span><i class="fas fa-spinner fa-spin"></i> Cargando...</span>`;
-    isPlaying = true;
-    playPauseIcon.className = 'fas fa-pause';
-    progressBar.value = 0;
-    timeCurrent.textContent = '0:00';
-    timeTotal.textContent = duration || '0:00';
 
-    const durationSec = parseDuration(duration);
+    const durationSec = typeof duration === "string" ? parseDuration(duration) : duration;
 
     fetch(`https://${GetParentResourceName()}/playMusic`, {
         method: 'POST',
@@ -134,16 +138,12 @@ function playMusic(url, title, duration) {
 // Play/Pause
 playPauseBtn.onclick = function () {
     if (isPlaying) {
-        isPlaying = false;
-        playPauseIcon.className = 'fas fa-play';
         fetch(`https://${GetParentResourceName()}/pauseMusic`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json; charset=UTF-8' },
             body: JSON.stringify({})
         });
     } else {
-        isPlaying = true;
-        playPauseIcon.className = 'fas fa-pause';
         fetch(`https://${GetParentResourceName()}/resumeMusic`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json; charset=UTF-8' },
@@ -154,13 +154,6 @@ playPauseBtn.onclick = function () {
 
 // Detener música
 stopBtn.onclick = function () {
-    nowPlaying.innerHTML = `<span>Sin reproducir</span>`;
-    isPlaying = false;
-    playPauseIcon.className = 'fas fa-play';
-    progressBar.value = 0;
-    timeCurrent.textContent = '0:00';
-    timeTotal.textContent = '0:00';
-
     fetch(`https://${GetParentResourceName()}/stopMusic`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json; charset=UTF-8' },
@@ -241,7 +234,6 @@ searchBtn.onclick = async function () {
     const val = searchInput.value.trim();
     if (val === "") return;
 
-    // Si es un link directo, reproducir directamente
     if (val.startsWith("http://") || val.startsWith("https://")) {
         let title = "Link directo";
         try {
