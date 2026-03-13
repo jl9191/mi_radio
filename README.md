@@ -9,8 +9,8 @@ Radio de vehículo con búsqueda de YouTube y soporte para URLs directas. Cada a
 
 ## Instalación
 
-1. Coloca la carpeta `mi_radiov3` en tu directorio de resources
-2. Agrega `ensure mi_radiov3` en tu `server.cfg` (después de `xsound` y `qb-core`)
+1. Coloca la carpeta `mi_radio` en tu directorio de resources
+2. Agrega `ensure mi_radio` en tu `server.cfg` (después de `xsound` y `qb-core`)
 3. Reinicia el servidor
 
 ## Configuración
@@ -18,7 +18,7 @@ Radio de vehículo con búsqueda de YouTube y soporte para URLs directas. Cada a
 Edita `config.lua`:
 
 ```lua
-Config.Command = "carradiov3"   -- Comando para abrir la radio
+Config.Command = "carradio"   -- Comando para abrir la radio
 Config.MaxDistance = 20.0        -- Distancia en metros que otros jugadores escuchan la música
 ```
 
